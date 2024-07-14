@@ -8,30 +8,49 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/joho/godotenv"
 )
 
 const path string = "./database.json"
 
+type apiConfig struct {
+	fileserverHits int
+	db *DB
+}
 
 
 func main() {
+	godotenv.Load()
 	serveMux := http.NewServeMux()
 	server := http.Server{
 		Handler: serveMux,
 		Addr: "localhost:8080",
 	}
 	
-	apiCfg := apiConfig{}
+	db, err := NewDB(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	apiCfg := apiConfig{
+		fileserverHits: 0,
+		db: db,	
+	}
 
 	serveMux.Handle("/app/*", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
-	serveMux.HandleFunc("GET /api/healthz", HandleHealthz)
+	serveMux.HandleFunc("GET /api/healthz", apiCfg.HandleHealthz)
 	serveMux.HandleFunc("GET /admin/metrics", apiCfg.HandleFileServerHits )
 	serveMux.HandleFunc("/api/reset", apiCfg.HandleResetFileServerHits)
-	serveMux.HandleFunc("POST /api/chirps", HandleCreateChirp)
-	serveMux.HandleFunc("GET /api/chirps", HandleGetChirps)
-	serveMux.HandleFunc("GET /api/chirps/{chirpID}", HandleGetChirp)
+	serveMux.HandleFunc("POST /api/chirps", apiCfg.HandleCreateChirp)
+	serveMux.HandleFunc("GET /api/chirps", apiCfg.HandleGetChirps)
+	serveMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.HandleCreateChirp)
+	serveMux.HandleFunc("POST /api/users", apiCfg.HandleUserCreate)
+	serveMux.HandleFunc("PUT /api/users", apiCfg.HandleUserUpdate)
+	serveMux.HandleFunc("GET /api/users", apiCfg.HandleUserList)
+	serveMux.HandleFunc("POST /api/login", apiCfg.HandleUserLogin)
+	serveMux.HandleFunc("POST /api/refresh", apiCfg.HandleRefresh)
 
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -61,7 +80,7 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(dat)
 }
 
-func HandleGetChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) HandleGetChirp(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("chirpID"))
 	if err != nil {
 		log.Printf("error getting id: %v", err)
@@ -74,10 +93,9 @@ func HandleGetChirp(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 200, chirp)
 }
 
-func HandleGetChirps(w http.ResponseWriter, r *http.Request) {
-	db := createDB()
-	db.loadDB()
-	chirps, err := db.GetChirps()
+func (cfg *apiConfig) HandleGetChirps(w http.ResponseWriter, r *http.Request) {
+	cfg.db.loadDB()
+	chirps, err := cfg.db.GetChirps()
 	if err != nil {
 		log.Println("error loading chirps")
 		respondWithError(w, 500, "error loading chirps")
@@ -85,7 +103,7 @@ func HandleGetChirps(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 200, chirps)
 }
 
-func HandleCreateChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) HandleCreateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Chirp string `json:"body"`
 	}
@@ -105,19 +123,18 @@ func HandleCreateChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := createDB() 
-	dbStructure, err := db.loadDB()
+	dbStructure, err := cfg.db.loadDB()
 	if err != nil {
 		log.Printf("error loading db")
 	}
-	chirp, err := db.CreateChirp(cleanChirp(params.Chirp))
+	chirp, err := cfg.db.CreateChirp(cleanChirp(params.Chirp))
 	if err != nil {
 		log.Println("error creating chirp")
 		return
 	}
 	dbStructure.Chirps[chirp.ID] = chirp
 
-	err = db.writeDB(dbStructure)
+	err = cfg.db.writeDB(dbStructure)
 	if err != nil {
 		log.Println("error writing database")
 	}
@@ -141,16 +158,13 @@ func cleanChirp(chirp string) string {
 }
 
 
-func HandleHealthz(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) HandleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 	
 }
 
-type apiConfig struct {
-	fileserverHits int
-}
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request){

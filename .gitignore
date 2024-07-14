@@ -1,3 +1,6 @@
-out
+.env
 database.json
+run.sh
+# Logging
+out
 nohup.out
