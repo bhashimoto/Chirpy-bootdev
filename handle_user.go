@@ -1,8 +1,8 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -14,8 +14,79 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func (cfg * apiConfig) HandleRefresh(w http.ResponseWriter, r *http.Request) {
-	
+func ValidateJWT(r *http.Request) (string, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("authorization header missing")	
+	}
+
+	tokenParts := strings.Split(r.Header.Get("Authorization"), " ")
+	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+		log.Println("Error in Split at validateToken")
+		return "", errors.New("invalid authorization header format")	
+	}
+	tokenString := tokenParts[1]
+
+	claims := jwt.RegisteredClaims{}
+
+	token, err := jwt.ParseWithClaims(tokenString, &claims, func (token *jwt.Token) (interface{}, error) {
+		return []byte(os.Getenv("JWT_SECRET")), nil
+	})
+
+	if err != nil  {
+		log.Println("Error in ParseWithClaims at validateToken")
+		return "", err
+	}
+
+	userIDString, err := token.Claims.GetSubject()
+	if err != nil {
+		return "", err
+	}
+
+	return userIDString, nil
+}
+
+
+func (cfg *apiConfig) HandleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	tokenParts := strings.Split(r.Header.Get("Authorization"), " ")
+	tokenString := tokenParts[1]
+
+	err := cfg.db.RevokeToken(tokenString)
+	if err != nil {
+		respondWithError(w, 500, "internal error")
+		return
+	}
+	respondWithJSON(w, 204, "")
+}
+
+func (cfg * apiConfig) HandleRefreshJWT(w http.ResponseWriter, r *http.Request) {
+	tokenParts := strings.Split(r.Header.Get("Authorization"), " ")
+	tokenString := tokenParts[1]
+
+	refreshToken, err := cfg.db.GetRefreshToken(tokenString)
+	if err != nil {
+		respondWithError(w, 401, "invalid token")
+		return
+	}
+
+	newJWT, err := cfg.generateJWT((*refreshToken).UserID, 60*60)
+	if err != nil {
+		respondWithError(w, 500, "problem generating token")
+		return
+	}
+
+	type JWT struct {
+		NewToken string `json:"token"`
+	}
+
+	payload := JWT{
+		NewToken: newJWT,
+	}
+	respondWithJSON(w, 200, payload)
+
+
+
+
 }
 
 func (cfg *apiConfig) HandleUserLogin(w http.ResponseWriter, r *http.Request) {
@@ -52,68 +123,61 @@ func (cfg *apiConfig) HandleUserLogin(w http.ResponseWriter, r *http.Request) {
 		params.ExpiresInSeconds = 60*60
 	}
 
-	token := jwt.NewWithClaims(
-		jwt.SigningMethodHS256, 
-		jwt.RegisteredClaims{
-			Issuer: "chirpy",
-			IssuedAt: jwt.NewNumericDate(time.Now().UTC()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(time.Second*time.Duration(params.ExpiresInSeconds))),
-			Subject: strconv.Itoa(user.ID),
-		},
-	)
-
-
-	secretKey := []byte(os.Getenv("JWT_SECRET"))
-	signedJWT, err := token.SignedString(secretKey)
-	refreshToken := make([]byte, 32)
-	_ , err = rand.Read(refreshToken)
+	signedJWT, err := cfg.generateJWT(user.ID, params.ExpiresInSeconds)
 	if err != nil {
-		log.Fatal("Error getting random number")
+		respondWithError(w, 500, err.Error())
 	}
 
+	refreshToken, err := cfg.db.CreateRefreshToken(user.ID)
 	if err != nil {
+		respondWithError(w, 500, "error creating refres token")
 		log.Fatal(err)
 	}
 
 	ret := struct {
 		ID		int    `json:"id"`
 		Email		string `json:"email"`
+		IsChirpyRed	bool   `json:"is_chirpy_red"`
 		Token		string `json:"token"`
+		RefreshToken	string `json:"refresh_token"`
 	}{
 		ID: user.ID,
 		Email: user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 		Token: signedJWT,
+		RefreshToken: refreshToken.Token,
 	}
-
-
 
 	respondWithJSON(w, 200, ret)
 	
 }
 
+func (cfg *apiConfig) generateJWT(userID int, expiresInSeconds int) (string, error) {
+	token := jwt.NewWithClaims(
+		jwt.SigningMethodHS256, 
+		jwt.RegisteredClaims{
+			Issuer: "chirpy",
+			IssuedAt: jwt.NewNumericDate(time.Now().UTC()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(time.Second*time.Duration(expiresInSeconds))),
+			Subject: strconv.Itoa(userID),
+		},
+	)
+
+
+	secretKey := []byte(os.Getenv("JWT_SECRET"))
+	signedJWT, err := token.SignedString(secretKey)
+	if err != nil {
+		return "", err
+	}
+	return signedJWT, nil
+}
+
 func (cfg *apiConfig) HandleUserUpdate(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		respondWithError(w, 401, "authorization header missing")
-	}
-
-	tokenParts := strings.Split(r.Header.Get("Authorization"), " ")
-	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-		respondWithError(w, 401, "invalid authorization header format")
-	}
-	tokenString := tokenParts[1]
-
-	claims := &jwt.RegisteredClaims{}
-
-	token, err := jwt.ParseWithClaims(tokenString, claims, func (token *jwt.Token) (interface{}, error) {
-		return []byte(os.Getenv("JWT_SECRET")), nil
-	})
-	if err != nil || !token.Valid {
-		respondWithError(w, 401, "invalid token")
+	userIDString, err := ValidateJWT(r)
+	if err != nil {
+		respondWithError(w, 401, err.Error())
 		return
 	}
-
-	userID, err := strconv.Atoi(claims.Subject)
 
 	type parameters struct {
 		Password string `json:"password"`
@@ -127,10 +191,11 @@ func (cfg *apiConfig) HandleUserUpdate(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 400, "bad request")
 		return
 	}
-
+	userID, _ := strconv.Atoi(userIDString)
 	user, err := cfg.db.UpdateUser(userID, params.Email, params.Password)
 	if err != nil {
 		respondWithError(w, 500, "could not update credentials")
+		return
 	}
 	respondWithJSON(w, 200, user)
 }

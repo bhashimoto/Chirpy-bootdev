@@ -5,9 +5,8 @@ import (
 	"errors"
 	"log"
 	"os"
+	"sort"
 	"sync"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 
@@ -18,9 +17,9 @@ type DB struct {
 }
 
 type DBStructure struct {
-	Chirps map[int]Chirp `json:"chirps"`
-	Users map[int]UserCredential `json:"users"`
-	RefreshTokens map[RefreshToken]int `json:"refresh_tokens"`
+	Chirps		map[int]Chirp		`json:"chirps"`
+	Users		map[int]UserCredential	`json:"users"`
+	RefreshTokens	map[string]RefreshToken	`json:"refresh_tokens"`
 }
 
 func NewDB(path string) (*DB, error) {
@@ -69,122 +68,16 @@ func (db *DB) writeDB(dbStructure DBStructure) error {
 
 }
 
-func (db *DB) UpdateRefreshToken(id int, token string) (error) {
-	dbs, err := db.loadDB()
-	if err != nil  {
-		return err
-	}
-	oldUser, found := dbs.Users[id]
-	if !found {
-		return errors.New("user not found")
-	}
-
-	
-	user := UserCredential {
-		User: User {
-			ID: oldUser.ID,
-			Email: oldUser.Email,
-		},
-		Password: oldUser.Password,
-
-	}
-	dbs.Users[id] = user
-	err = db.writeDB(dbs)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (db *DB) UpdateUser(id int, email string, password string) (User, error) {
-	dbs, err := db.loadDB()
-	if err != nil {
-		return User{}, err
-	}
-
-	oldUser, found := dbs.Users[id]
-	if !found {
-		return User{}, errors.New("user not found")
-	}
-	hashed, err := bcrypt.GenerateFromPassword([]byte(password), 0)
-	if err != nil {
-		return User{}, err
-	}
-
-	user := UserCredential {
-		User: User {
-			ID: oldUser.ID,
-			Email: email, 
-		},
-		Password: hashed,
-	}
-	dbs.Users[id] = user
-
-	
-
-	db.writeDB(dbs)
-	return user.User, nil
-}
-
-func (db *DB) CreateUser(email string, password string) (User, error) {
-	dbs, err := db.loadDB()
-	if err != nil {
-		return User{}, err
-	}
-
-	hashed, err := bcrypt.GenerateFromPassword([]byte(password), 0)
-	if err != nil {
-		return User{}, nil
-	}
-	user := UserCredential{
-		User: User{
-			ID: len(dbs.Users) + 1,
-			Email: email,
-		},
-		Password: hashed,
-	}
-	dbs.Users[user.ID] = user
-	err = db.writeDB(dbs)
-	if err != nil {
-		return User{}, err
-	}
-	return user.User, nil
-}
-
-func (db *DB) GetUsers() ([]User, error) {
-	dbs, err := db.loadDB()
-	if err != nil {
-		return []User{}, err
-	}
-	users := []User{}
-
-	for _, user := range dbs.Users {
-		users = append(users, user.User)
-	}
-	return users, nil
-}
-
-func (db *DB) GetUserByEmail(email string) (UserCredential, error) {
-	dbs, err := db.loadDB()
-	if err != nil {
-		return UserCredential{}, err
-	}
-
-	for _, user := range dbs.Users {
-		if user.Email == email {
-			return user, nil
-		}
-	}
-	return UserCredential{}, errors.New("user not found")
-}
 
 
-func (db *DB) CreateChirp(body string) (Chirp, error) {
+
+func (db *DB) CreateChirp(body string, userID int) (Chirp, error) {
 	log.Printf("creating new chirp: %v", body)
 	dbStructure, _ := db.loadDB()
 	chirp := Chirp{
 		ID: len(dbStructure.Chirps) + 1,
 		Body: body,
+		AuthorID: userID,
 	}
 	dbStructure.Chirps[chirp.ID] = chirp
 	err := db.writeDB(dbStructure)
@@ -194,7 +87,7 @@ func (db *DB) CreateChirp(body string) (Chirp, error) {
 	return chirp, nil
 }
 
-func (db *DB) GetChirps() ([]Chirp, error) {
+func (db *DB) GetChirps(userID int, sortDirection string) ([]Chirp, error) {
 	log.Println("getting chirps")
 	dbStructure, err := db.loadDB()
 	if err != nil {
@@ -204,7 +97,19 @@ func (db *DB) GetChirps() ([]Chirp, error) {
 	chirps := []Chirp{}
 
 	for _, chirp := range dbStructure.Chirps {
-		chirps = append(chirps, chirp)
+		if userID == 0 || userID == chirp.AuthorID {
+			chirps = append(chirps, chirp)
+		}
+	}
+
+	if sortDirection == "asc" {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].ID < chirps[j].ID
+		})
+	} else {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].ID > chirps[j].ID
+		})
 	}
 	return chirps, nil
 
@@ -219,13 +124,28 @@ func (db *DB) GetChirp(id int) (Chirp, bool) {
 	return chirp, true
 }
 
+func (db *DB) DeleteChirp(chirpID int) error {
+	dbs, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+	_, ok := dbs.Chirps[chirpID]
+	if ok {
+		delete(dbs.Chirps, chirpID)
+	}
+	db.writeDB(dbs)
+	return nil
+}
+
 func (db *DB) CreateDB() (error) {
 	dbs := DBStructure {
 		Chirps: map[int]Chirp{},
 		Users: map[int]UserCredential{},
+		RefreshTokens: map[string]RefreshToken{},
 	}
 	return db.writeDB(dbs)
 }
+
 
 func (db *DB) ensureDB() error {
 	_, err := os.ReadFile(db.path)

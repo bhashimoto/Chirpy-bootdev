@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -44,11 +44,14 @@ func main() {
 	serveMux.HandleFunc("POST /api/chirps", apiCfg.HandleCreateChirp)
 	serveMux.HandleFunc("GET /api/chirps", apiCfg.HandleGetChirps)
 	serveMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.HandleCreateChirp)
+	serveMux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.HandleChirpDelete)
 	serveMux.HandleFunc("POST /api/users", apiCfg.HandleUserCreate)
 	serveMux.HandleFunc("PUT /api/users", apiCfg.HandleUserUpdate)
 	serveMux.HandleFunc("GET /api/users", apiCfg.HandleUserList)
 	serveMux.HandleFunc("POST /api/login", apiCfg.HandleUserLogin)
-	serveMux.HandleFunc("POST /api/refresh", apiCfg.HandleRefresh)
+	serveMux.HandleFunc("POST /api/refresh", apiCfg.HandleRefreshJWT)
+	serveMux.HandleFunc("POST /api/revoke", apiCfg.HandleRevokeToken)
+	serveMux.HandleFunc("POST /api/polka/webhooks", apiCfg.HandlePolkaWebhooks)
 
 	err = server.ListenAndServe()
 	if err != nil {
@@ -80,81 +83,34 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(dat)
 }
 
-func (cfg *apiConfig) HandleGetChirp(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("chirpID"))
-	if err != nil {
-		log.Printf("error getting id: %v", err)
+func getAPIKey(r *http.Request) (string, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("authorization header missing")	
 	}
-	db := createDB()
-	chirp, found := db.GetChirp(id)
-	if !found {
-		respondWithError(w, 404, "Chirp not found")
+
+	tokenParts := strings.Split(r.Header.Get("Authorization"), " ")
+	if len(tokenParts) != 2 || tokenParts[0] != "ApiKey" {
+		return "", errors.New("invalid authorization header format")	
 	}
-	respondWithJSON(w, 200, chirp)
+	tokenString := tokenParts[1]
+
+	return tokenString, nil
 }
 
-func (cfg *apiConfig) HandleGetChirps(w http.ResponseWriter, r *http.Request) {
-	cfg.db.loadDB()
-	chirps, err := cfg.db.GetChirps()
-	if err != nil {
-		log.Println("error loading chirps")
-		respondWithError(w, 500, "error loading chirps")
-	}
-	respondWithJSON(w, 200, chirps)
-}
-
-func (cfg *apiConfig) HandleCreateChirp(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Chirp string `json:"body"`
-	}
-	decoder := json.NewDecoder(r.Body)
-
-	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
-		log.Printf("Error decoding parameters: %s", err)
-		respondWithError(w, 500, "Something went wrong")
-		return
-	}
-	
-
-	if len(params.Chirp) > 140 {
-		respondWithError(w, 500, "Chirp is too long")
-		return
+func getAuthToken(r *http.Request) (string, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("authorization header missing")	
 	}
 
-	dbStructure, err := cfg.db.loadDB()
-	if err != nil {
-		log.Printf("error loading db")
+	tokenParts := strings.Split(r.Header.Get("Authorization"), " ")
+	if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+		return "", errors.New("invalid authorization header format")	
 	}
-	chirp, err := cfg.db.CreateChirp(cleanChirp(params.Chirp))
-	if err != nil {
-		log.Println("error creating chirp")
-		return
-	}
-	dbStructure.Chirps[chirp.ID] = chirp
+	tokenString := tokenParts[1]
 
-	err = cfg.db.writeDB(dbStructure)
-	if err != nil {
-		log.Println("error writing database")
-	}
-	respondWithJSON(w, 201, chirp)
-}
-
-func cleanChirp(chirp string) string {
-	badWords := map[string]bool{
-		"kerfuffle": true,
-		"sharbert": true,
-		"fornax": true,
-	}
-	words := strings.Split(chirp, " ")
-	for i, word := range words {
-		if badWords[strings.ToLower(word)] {
-			words[i] = "****"
-		}
-	}
-	return strings.Join(words, " ")
-
+	return tokenString, nil
 }
 
 
